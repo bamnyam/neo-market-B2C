@@ -34,7 +34,7 @@ class B2BOrdersClient:
     def reserve(self, idempotency_key, items):
         payload = self._request_json(
             "POST",
-            "/api/v1/reserve",
+            "/api/v1/inventory/reserve",
             {
                 "idempotency_key": str(idempotency_key),
                 "items": [

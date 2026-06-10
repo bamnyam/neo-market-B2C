@@ -12,7 +12,15 @@ class CheckoutService:
     def __init__(self, b2b_client=None):
         self.b2b_client = b2b_client or B2BOrdersClient()
 
-    def checkout(self, buyer, idempotency_key, items, delivery_address=None):
+    def checkout(
+        self,
+        buyer,
+        idempotency_key,
+        items,
+        address,
+        payment_method,
+        comment="",
+    ):
         existing = self._existing_order(buyer, idempotency_key)
 
         if existing is not None:
@@ -37,7 +45,9 @@ class CheckoutService:
                     buyer=buyer,
                     status=OrderStatus.CREATED,
                     idempotency_key=idempotency_key,
-                    delivery_address=delivery_address or "",
+                    address=address,
+                    payment_method=payment_method,
+                    comment=comment,
                     total_amount=self._total_amount(items, sku_map),
                 )
                 self._create_items(order, items, sku_map)
@@ -47,10 +57,14 @@ class CheckoutService:
             return self._existing_order(buyer, idempotency_key), False
 
     def _existing_order(self, buyer, idempotency_key, lock=False):
-        queryset = Order.objects.prefetch_related("items")
-
         if lock:
-            queryset = queryset.select_for_update()
+            queryset = Order.objects.select_for_update()
+        else:
+            queryset = Order.objects.select_related(
+                "buyer",
+                "address",
+                "payment_method",
+            ).prefetch_related("items")
 
         return queryset.filter(buyer=buyer, idempotency_key=idempotency_key).first()
 

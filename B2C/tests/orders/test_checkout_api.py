@@ -3,7 +3,7 @@ import uuid
 import pytest
 from rest_framework.test import APIClient
 
-from app.buyers.models import Buyer
+from app.buyers.models import Address, Buyer, PaymentMethod, PaymentMethodType
 from app.carts.services.b2b_client import normalize_skus
 from app.orders.models import Order, OrderItem, OrderStatus, OrderStatusHistory
 from app.orders.services.b2b_client import B2BUnavailableError, ReserveFailedError
@@ -20,6 +20,32 @@ def buyer():
         email=f"{uuid.uuid4()}@example.com",
         password="strong-password",
         first_name="Buyer",
+    )
+
+
+@pytest.fixture
+def address(buyer):
+    return Address.objects.create(
+        buyer=buyer,
+        country="Россия",
+        region="Свердловская область",
+        city="Екатеринбург",
+        street="Мира",
+        building="19",
+        apartment="42",
+        postal_code="620000",
+        recipient_name="Buyer",
+        recipient_phone="+79990000000",
+    )
+
+
+@pytest.fixture
+def payment_method(buyer):
+    return PaymentMethod.objects.create(
+        buyer=buyer,
+        type=PaymentMethodType.CARD,
+        card_last4="1234",
+        card_brand=PaymentMethod.CardBrand.MIR,
     )
 
 
@@ -48,7 +74,13 @@ def sku_payload(
 
 
 @pytest.mark.django_db
-def test_checkout_creates_paid_order_with_fixed_prices(api_client, buyer, monkeypatch):
+def test_checkout_creates_paid_order_with_fixed_prices(
+    api_client,
+    buyer,
+    address,
+    payment_method,
+    monkeypatch,
+):
     sku_id = uuid.uuid4()
     product_id = uuid.uuid4()
     idempotency_key = uuid.uuid4()
@@ -73,16 +105,29 @@ def test_checkout_creates_paid_order_with_fixed_prices(api_client, buyer, monkey
     response = api_client.post(
         "/api/v1/orders",
         {
-            "idempotency_key": str(idempotency_key),
             "items": [{"sku_id": str(sku_id), "quantity": 2}],
-            "delivery_address": "г. Екатеринбург, ул. Мира 19",
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
+            "comment": "Позвонить за час",
         },
         format="json",
+        HTTP_IDEMPOTENCY_KEY=str(idempotency_key),
     )
 
     assert response.status_code == 201
+    assert response.data["buyer_id"] == str(buyer.uuid)
     assert response.data["status"] == OrderStatus.PAID
-    assert response.data["total_amount"] == 2600
+    assert response.data["subtotal"] == 2600
+    assert response.data["delivery_cost"] == 0
+    assert response.data["total"] == 2600
+    assert response.data["address"]["id"] == str(address.uuid)
+    assert response.data["address"]["city"] == "Екатеринбург"
+    assert response.data["payment_method"]["id"] == str(payment_method.uuid)
+    assert response.data["payment_method"]["type"] == PaymentMethodType.CARD
+    assert response.data["comment"] == "Позвонить за час"
+    assert response.data["cancel_reason"] is None
+    assert response.data["paid_at"] is not None
+    assert response.data["delivered_at"] is None
     assert response.data["items"][0]["unit_price"] == 1300
     assert response.data["items"][0]["line_total"] == 2600
     assert reserves[0][0] == idempotency_key
@@ -92,6 +137,9 @@ def test_checkout_creates_paid_order_with_fixed_prices(api_client, buyer, monkey
     assert order.status == OrderStatus.PAID
     assert order.paid_at is not None
     assert order.total_amount == 2600
+    assert order.address == address
+    assert order.payment_method == payment_method
+    assert order.comment == "Позвонить за час"
     assert item.product_id == product_id
     assert item.unit_price == 1300
     assert item.line_total == 2600
@@ -107,7 +155,13 @@ def test_checkout_creates_paid_order_with_fixed_prices(api_client, buyer, monkey
 
 
 @pytest.mark.django_db
-def test_partial_reserve_failure_returns_409(api_client, buyer, monkeypatch):
+def test_partial_reserve_failure_returns_409(
+    api_client,
+    buyer,
+    address,
+    payment_method,
+    monkeypatch,
+):
     ok_sku_id = uuid.uuid4()
     failed_sku_id = uuid.uuid4()
     failed_items = [
@@ -139,13 +193,15 @@ def test_partial_reserve_failure_returns_409(api_client, buyer, monkeypatch):
     response = api_client.post(
         "/api/v1/orders",
         {
-            "idempotency_key": str(uuid.uuid4()),
             "items": [
                 {"sku_id": str(ok_sku_id), "quantity": 1},
                 {"sku_id": str(failed_sku_id), "quantity": 2},
             ],
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
         },
         format="json",
+        HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()),
     )
 
     assert response.status_code == 409
@@ -156,7 +212,13 @@ def test_partial_reserve_failure_returns_409(api_client, buyer, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_idempotency_returns_existing_order(api_client, buyer, monkeypatch):
+def test_idempotency_returns_existing_order(
+    api_client,
+    buyer,
+    address,
+    payment_method,
+    monkeypatch,
+):
     sku_id = uuid.uuid4()
     idempotency_key = uuid.uuid4()
     reserve_calls = []
@@ -172,12 +234,23 @@ def test_idempotency_returns_existing_order(api_client, buyer, monkeypatch):
     )
     api_client.force_authenticate(user=buyer)
     payload = {
-        "idempotency_key": str(idempotency_key),
         "items": [{"sku_id": str(sku_id), "quantity": 1}],
+        "address_id": str(address.uuid),
+        "payment_method_id": str(payment_method.uuid),
     }
 
-    first_response = api_client.post("/api/v1/orders", payload, format="json")
-    second_response = api_client.post("/api/v1/orders", payload, format="json")
+    first_response = api_client.post(
+        "/api/v1/orders",
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY=str(idempotency_key),
+    )
+    second_response = api_client.post(
+        "/api/v1/orders",
+        payload,
+        format="json",
+        HTTP_IDEMPOTENCY_KEY=str(idempotency_key),
+    )
 
     assert first_response.status_code == 201
     assert second_response.status_code == 201
@@ -188,7 +261,13 @@ def test_idempotency_returns_existing_order(api_client, buyer, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_b2b_unavailable_returns_503(api_client, buyer, monkeypatch):
+def test_b2b_unavailable_returns_503(
+    api_client,
+    buyer,
+    address,
+    payment_method,
+    monkeypatch,
+):
     def b2b_unavailable(self, sku_ids):
         raise B2BUnavailableError("B2B service is unavailable")
 
@@ -201,10 +280,12 @@ def test_b2b_unavailable_returns_503(api_client, buyer, monkeypatch):
     response = api_client.post(
         "/api/v1/orders",
         {
-            "idempotency_key": str(uuid.uuid4()),
             "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
         },
         format="json",
+        HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()),
     )
 
     assert response.status_code == 503
@@ -213,15 +294,41 @@ def test_b2b_unavailable_returns_503(api_client, buyer, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_checkout_rejects_cart_id(api_client, buyer):
+def test_checkout_rejects_cart_id(api_client, buyer, address, payment_method):
     api_client.force_authenticate(user=buyer)
 
     response = api_client.post(
         "/api/v1/orders",
         {
-            "idempotency_key": str(uuid.uuid4()),
             "cart_id": str(uuid.uuid4()),
             "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
+        },
+        format="json",
+        HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+    )
+
+    assert response.status_code == 400
+    assert response.data["code"] == "INVALID_REQUEST"
+    assert Order.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_checkout_requires_idempotency_key_header(
+    api_client,
+    buyer,
+    address,
+    payment_method,
+):
+    api_client.force_authenticate(user=buyer)
+
+    response = api_client.post(
+        "/api/v1/orders",
+        {
+            "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
         },
         format="json",
     )

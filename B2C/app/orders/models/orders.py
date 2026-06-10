@@ -33,6 +33,24 @@ class Order(models.Model):
         null=True,
         blank=True,
     )
+    address = models.ForeignKey(
+        "buyers.Address",
+        on_delete=models.PROTECT,
+        related_name="orders",
+        null=True,
+        blank=True,
+    )
+    payment_method = models.ForeignKey(
+        "buyers.PaymentMethod",
+        on_delete=models.PROTECT,
+        related_name="orders",
+        null=True,
+        blank=True,
+    )
+    comment = models.CharField(
+        max_length=1000,
+        blank=True,
+    )
     cancel_reason = models.CharField(
         max_length=500,
         blank=True,
