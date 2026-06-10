@@ -1,3 +1,5 @@
+import uuid
+
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -12,7 +14,28 @@ class OrdersController(APIView):
     service_class = CheckoutService
 
     def post(self, request):
-        serializer = CheckoutSerializer(data=request.data)
+        idempotency_key = request.META.get("HTTP_IDEMPOTENCY_KEY")
+
+        if not idempotency_key:
+            return self._error(
+                "INVALID_REQUEST",
+                "Заголовок Idempotency-Key обязателен",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            idempotency_key = uuid.UUID(idempotency_key)
+        except ValueError:
+            return self._error(
+                "INVALID_REQUEST",
+                "Заголовок Idempotency-Key должен быть UUID",
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = CheckoutSerializer(
+            data=request.data,
+            context={"buyer": request.user},
+        )
 
         if not serializer.is_valid():
             if self._items_are_empty(serializer.errors):
@@ -38,9 +61,11 @@ class OrdersController(APIView):
         try:
             order, _ = self.service_class().checkout(
                 buyer=request.user,
-                idempotency_key=serializer.validated_data["idempotency_key"],
+                idempotency_key=idempotency_key,
                 items=serializer.validated_data["items"],
-                delivery_address=serializer.validated_data.get("delivery_address"),
+                address=serializer.validated_data["address"],
+                payment_method=serializer.validated_data["payment_method"],
+                comment=serializer.validated_data.get("comment") or "",
             )
         except ReserveFailedError as exc:
             return Response(
@@ -62,9 +87,12 @@ class OrdersController(APIView):
 
     def _serialize_order(self, order):
         items = list(order.items.all())
+        subtotal = order.total_amount
+        delivery_cost = 0
 
         return {
             "id": str(order.uuid),
+            "buyer_id": str(order.buyer.uuid),
             "status": order.status,
             "items": [
                 {
@@ -79,10 +107,44 @@ class OrdersController(APIView):
                 }
                 for item in items
             ],
-            "total_amount": order.total_amount,
-            "delivery_address": order.delivery_address,
+            "subtotal": subtotal,
+            "delivery_cost": delivery_cost,
+            "total": subtotal + delivery_cost,
+            "address": self._serialize_address(order.address),
+            "payment_method": self._serialize_payment_method(order.payment_method),
+            "comment": order.comment or None,
+            "cancel_reason": order.cancel_reason or None,
             "created_at": order.created_at,
             "updated_at": order.updated_at,
+            "paid_at": order.paid_at,
+            "delivered_at": order.delivered_at,
+        }
+
+    def _serialize_address(self, address):
+        return {
+            "id": str(address.uuid),
+            "country": address.country,
+            "region": address.region,
+            "city": address.city,
+            "street": address.street,
+            "building": address.building,
+            "apartment": address.apartment,
+            "postal_code": address.postal_code,
+            "recipient_name": address.recipient_name,
+            "recipient_phone": address.recipient_phone,
+            "is_default": address.is_default,
+            "comment": address.comment,
+            "created_at": address.created_at,
+        }
+
+    def _serialize_payment_method(self, payment_method):
+        return {
+            "id": str(payment_method.uuid),
+            "type": payment_method.type,
+            "card_last4": payment_method.card_last4,
+            "card_brand": payment_method.card_brand,
+            "is_default": payment_method.is_default,
+            "created_at": payment_method.created_at,
         }
 
     def _error(self, code, message, response_status):
