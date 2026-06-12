@@ -21,7 +21,9 @@ class CancelNotAllowedError(Exception):
 class CancelOrderService:
     cancellable_statuses = {
         OrderStatus.CREATED,
-        OrderStatus.PAID
+        OrderStatus.PAID,
+        OrderStatus.ASSEMBLING,
+        OrderStatus.DELIVERING
     }
 
     def __init__(self, b2b_client=None):
