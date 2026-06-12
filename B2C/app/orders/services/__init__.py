@@ -5,13 +5,14 @@ from app.orders.services.cancel_order import (
     OrderNotFoundError,
     retry_pending_cancellations,
 )
-from app.orders.services.checkout_service import CheckoutService
+from app.orders.services.checkout_service import CheckoutService, EmptyCartError
 
 __all__ = [
     "B2BUnavailableError",
     "CancelNotAllowedError",
     "CancelOrderService",
     "CheckoutService",
+    "EmptyCartError",
     "OrderNotFoundError",
     "ReserveFailedError",
     "retry_pending_cancellations",

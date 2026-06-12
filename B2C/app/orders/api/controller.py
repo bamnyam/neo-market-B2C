@@ -11,6 +11,7 @@ from app.orders.services import (
     CancelNotAllowedError,
     CancelOrderService,
     CheckoutService,
+    EmptyCartError,
     OrderNotFoundError,
     ReserveFailedError,
 )
@@ -45,20 +46,6 @@ class OrdersController(APIView):
         )
 
         if not serializer.is_valid():
-            if self._items_are_empty(serializer.errors):
-                return self._error(
-                    "INVALID_REQUEST",
-                    "Список items не может быть пустым",
-                    status.HTTP_400_BAD_REQUEST,
-                )
-
-            if self._has_quantity_error(serializer.errors):
-                return self._error(
-                    "INVALID_QUANTITY",
-                    "Количество должно быть не менее 1 для каждой позиции",
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                )
-
             return self._error(
                 "INVALID_REQUEST",
                 "Некорректный запрос",
@@ -69,10 +56,15 @@ class OrdersController(APIView):
             order, _ = self.service_class().checkout(
                 buyer=request.user,
                 idempotency_key=idempotency_key,
-                items=serializer.validated_data["items"],
                 address=serializer.validated_data["address"],
                 payment_method=serializer.validated_data["payment_method"],
                 comment=serializer.validated_data.get("comment") or "",
+            )
+        except EmptyCartError:
+            return self._error(
+                "INVALID_REQUEST",
+                "Корзина пуста",
+                status.HTTP_400_BAD_REQUEST,
             )
         except ReserveFailedError as exc:
             return Response(
@@ -103,25 +95,6 @@ class OrdersController(APIView):
 
     def _error(self, code, message, response_status):
         return error_response(code, message, response_status)
-
-    def _items_are_empty(self, errors):
-        item_errors = errors.get("items")
-
-        if not isinstance(item_errors, list) or not item_errors:
-            return False
-
-        return not isinstance(item_errors[0], dict)
-
-    def _has_quantity_error(self, errors):
-        item_errors = errors.get("items")
-
-        if not isinstance(item_errors, list):
-            return False
-
-        return any(
-            isinstance(item_error, dict) and "quantity" in item_error
-            for item_error in item_errors
-        )
 
 
 class OrderCancelController(APIView):
@@ -183,7 +156,7 @@ def serialize_order(order):
                 "id": str(item.uuid),
                 "sku_id": str(item.sku_id),
                 "product_id": str(item.product_id),
-                "product_title": item.product_title,
+                "name": item.name,
                 "sku_name": item.sku_name,
                 "quantity": item.quantity,
                 "unit_price": item.unit_price,
