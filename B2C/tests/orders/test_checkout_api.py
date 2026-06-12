@@ -4,6 +4,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from app.buyers.models import Address, Buyer, PaymentMethod, PaymentMethodType
+from app.carts.models import CartItem
 from app.carts.services.b2b_client import normalize_skus
 from app.orders.models import Order, OrderItem, OrderStatus, OrderStatusHistory
 from app.orders.services.b2b_client import B2BUnavailableError, ReserveFailedError
@@ -73,6 +74,10 @@ def sku_payload(
     }
 
 
+def add_cart_item(buyer, sku_id, quantity=1):
+    return CartItem.objects.create(user=buyer, sku_id=sku_id, quantity=quantity)
+
+
 @pytest.mark.django_db
 def test_checkout_creates_paid_order_with_fixed_prices(
     api_client,
@@ -85,6 +90,7 @@ def test_checkout_creates_paid_order_with_fixed_prices(
     product_id = uuid.uuid4()
     idempotency_key = uuid.uuid4()
     reserves = []
+    add_cart_item(buyer, sku_id, quantity=2)
 
     monkeypatch.setattr(
         "app.orders.services.b2b_client.B2BOrdersClient.get_skus",
@@ -97,7 +103,9 @@ def test_checkout_creates_paid_order_with_fixed_prices(
     )
     monkeypatch.setattr(
         "app.orders.services.b2b_client.B2BOrdersClient.reserve",
-        lambda self, idem_key, items: reserves.append((idem_key, items))
+        lambda self, idem_key, order_id, items: reserves.append(
+            (idem_key, order_id, items)
+        )
         or {"reserved": True},
     )
     api_client.force_authenticate(user=buyer)
@@ -105,7 +113,6 @@ def test_checkout_creates_paid_order_with_fixed_prices(
     response = api_client.post(
         "/api/v1/orders",
         {
-            "items": [{"sku_id": str(sku_id), "quantity": 2}],
             "address_id": str(address.uuid),
             "payment_method_id": str(payment_method.uuid),
             "comment": "Позвонить за час",
@@ -128,9 +135,11 @@ def test_checkout_creates_paid_order_with_fixed_prices(
     assert response.data["cancel_reason"] is None
     assert response.data["paid_at"] is not None
     assert response.data["delivered_at"] is None
+    assert response.data["items"][0]["name"] == "Phone Black"
     assert response.data["items"][0]["unit_price"] == 1300
     assert response.data["items"][0]["line_total"] == 2600
     assert reserves[0][0] == idempotency_key
+    assert uuid.UUID(str(reserves[0][1])) == uuid.UUID(response.data["id"])
 
     order = Order.objects.get(idempotency_key=idempotency_key)
     item = OrderItem.objects.get(order=order)
@@ -140,6 +149,7 @@ def test_checkout_creates_paid_order_with_fixed_prices(
     assert order.address == address
     assert order.payment_method == payment_method
     assert order.comment == "Позвонить за час"
+    assert item.name == "Phone Black"
     assert item.product_id == product_id
     assert item.unit_price == 1300
     assert item.line_total == 2600
@@ -164,6 +174,8 @@ def test_partial_reserve_failure_returns_409(
 ):
     ok_sku_id = uuid.uuid4()
     failed_sku_id = uuid.uuid4()
+    add_cart_item(buyer, ok_sku_id)
+    add_cart_item(buyer, failed_sku_id, quantity=2)
     failed_items = [
         {
             "sku_id": str(failed_sku_id),
@@ -181,7 +193,7 @@ def test_partial_reserve_failure_returns_409(
         },
     )
 
-    def reserve_failed(self, idempotency_key, items):
+    def reserve_failed(self, idempotency_key, order_id, items):
         raise ReserveFailedError(failed_items)
 
     monkeypatch.setattr(
@@ -193,10 +205,6 @@ def test_partial_reserve_failure_returns_409(
     response = api_client.post(
         "/api/v1/orders",
         {
-            "items": [
-                {"sku_id": str(ok_sku_id), "quantity": 1},
-                {"sku_id": str(failed_sku_id), "quantity": 2},
-            ],
             "address_id": str(address.uuid),
             "payment_method_id": str(payment_method.uuid),
         },
@@ -222,6 +230,7 @@ def test_idempotency_returns_existing_order(
     sku_id = uuid.uuid4()
     idempotency_key = uuid.uuid4()
     reserve_calls = []
+    add_cart_item(buyer, sku_id)
 
     monkeypatch.setattr(
         "app.orders.services.b2b_client.B2BOrdersClient.get_skus",
@@ -229,12 +238,11 @@ def test_idempotency_returns_existing_order(
     )
     monkeypatch.setattr(
         "app.orders.services.b2b_client.B2BOrdersClient.reserve",
-        lambda self, idem_key, items: reserve_calls.append(items)
+        lambda self, idem_key, order_id, items: reserve_calls.append(items)
         or {"reserved": True},
     )
     api_client.force_authenticate(user=buyer)
     payload = {
-        "items": [{"sku_id": str(sku_id), "quantity": 1}],
         "address_id": str(address.uuid),
         "payment_method_id": str(payment_method.uuid),
     }
@@ -268,6 +276,8 @@ def test_b2b_unavailable_returns_503(
     payment_method,
     monkeypatch,
 ):
+    add_cart_item(buyer, uuid.uuid4())
+
     def b2b_unavailable(self, sku_ids):
         raise B2BUnavailableError("B2B service is unavailable")
 
@@ -280,7 +290,6 @@ def test_b2b_unavailable_returns_503(
     response = api_client.post(
         "/api/v1/orders",
         {
-            "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
             "address_id": str(address.uuid),
             "payment_method_id": str(payment_method.uuid),
         },
@@ -295,13 +304,13 @@ def test_b2b_unavailable_returns_503(
 
 @pytest.mark.django_db
 def test_checkout_rejects_cart_id(api_client, buyer, address, payment_method):
+    add_cart_item(buyer, uuid.uuid4())
     api_client.force_authenticate(user=buyer)
 
     response = api_client.post(
         "/api/v1/orders",
         {
             "cart_id": str(uuid.uuid4()),
-            "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
             "address_id": str(address.uuid),
             "payment_method_id": str(payment_method.uuid),
         },
@@ -326,11 +335,50 @@ def test_checkout_requires_idempotency_key_header(
     response = api_client.post(
         "/api/v1/orders",
         {
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
+        },
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.data["code"] == "INVALID_REQUEST"
+    assert Order.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_checkout_rejects_items_in_body(api_client, buyer, address, payment_method):
+    add_cart_item(buyer, uuid.uuid4())
+    api_client.force_authenticate(user=buyer)
+
+    response = api_client.post(
+        "/api/v1/orders",
+        {
             "items": [{"sku_id": str(uuid.uuid4()), "quantity": 1}],
             "address_id": str(address.uuid),
             "payment_method_id": str(payment_method.uuid),
         },
         format="json",
+        HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+    )
+
+    assert response.status_code == 400
+    assert response.data["code"] == "INVALID_REQUEST"
+    assert Order.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_checkout_rejects_empty_cart(api_client, buyer, address, payment_method):
+    api_client.force_authenticate(user=buyer)
+
+    response = api_client.post(
+        "/api/v1/orders",
+        {
+            "address_id": str(address.uuid),
+            "payment_method_id": str(payment_method.uuid),
+        },
+        format="json",
+        HTTP_IDEMPOTENCY_KEY=str(uuid.uuid4()),
     )
 
     assert response.status_code == 400

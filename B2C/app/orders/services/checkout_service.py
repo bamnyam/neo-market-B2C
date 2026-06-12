@@ -1,11 +1,18 @@
+import uuid
+
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from app.carts.models import CartItem
 from app.orders.models import Order, OrderItem, OrderStatus, OrderStatusHistory
 from app.orders.services.b2b_client import (
     B2BOrdersClient,
     ReserveFailedError,
 )
+
+
+class EmptyCartError(Exception):
+    pass
 
 
 class CheckoutService:
@@ -16,7 +23,6 @@ class CheckoutService:
         self,
         buyer,
         idempotency_key,
-        items,
         address,
         payment_method,
         comment="",
@@ -26,13 +32,19 @@ class CheckoutService:
         if existing is not None:
             return existing, False
 
+        items = self._cart_items(buyer)
+
+        if not items:
+            raise EmptyCartError
+
         sku_map = self.b2b_client.get_skus([item["sku_id"] for item in items])
         failed_items = self._validate_items(items, sku_map)
 
         if failed_items:
             raise ReserveFailedError(failed_items)
 
-        self.b2b_client.reserve(idempotency_key, items)
+        order_id = uuid.uuid4()
+        self.b2b_client.reserve(idempotency_key, order_id, items)
 
         try:
             with transaction.atomic():
@@ -42,6 +54,7 @@ class CheckoutService:
                     return existing, False
 
                 order = Order.objects.create(
+                    uuid=order_id,
                     buyer=buyer,
                     status=OrderStatus.CREATED,
                     idempotency_key=idempotency_key,
@@ -55,6 +68,15 @@ class CheckoutService:
                 return order, True
         except IntegrityError:
             return self._existing_order(buyer, idempotency_key), False
+
+    def _cart_items(self, buyer):
+        return [
+            {
+                "sku_id": item.sku_id,
+                "quantity": item.quantity,
+            }
+            for item in CartItem.objects.filter(user=buyer).order_by("created_at")
+        ]
 
     def _existing_order(self, buyer, idempotency_key, lock=False):
         if lock:
@@ -132,7 +154,7 @@ class CheckoutService:
                     order=order,
                     sku_id=item["sku_id"],
                     product_id=sku["product_id"],
-                    product_title=sku["product_title"],
+                    name=self._item_name(sku),
                     sku_name=sku["sku_name"],
                     quantity=item["quantity"],
                     unit_price=unit_price,
@@ -161,3 +183,9 @@ class CheckoutService:
 
     def _unit_price(self, sku):
         return max(sku["price"] - sku["discount"], 0)
+
+    def _item_name(self, sku):
+        if sku["sku_name"]:
+            return f"{sku['product_title']} {sku['sku_name']}".strip()
+
+        return sku["product_title"]

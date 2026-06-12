@@ -75,7 +75,7 @@ def create_order(
         order=order,
         sku_id=uuid.uuid4(),
         product_id=uuid.uuid4(),
-        product_title="Phone",
+        name="Phone Black",
         sku_name="Black",
         quantity=2,
         unit_price=1300,

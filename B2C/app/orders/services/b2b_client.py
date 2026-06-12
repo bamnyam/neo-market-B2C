@@ -31,12 +31,13 @@ class B2BOrdersClient:
         payload = self._request_json("GET", f"/api/v1/products?{query}")
         return normalize_skus(payload)
 
-    def reserve(self, idempotency_key, items):
+    def reserve(self, idempotency_key, order_id, items):
         payload = self._request_json(
             "POST",
             "/api/v1/inventory/reserve",
             {
                 "idempotency_key": str(idempotency_key),
+                "order_id": str(order_id),
                 "items": [
                     {
                         "sku_id": str(item["sku_id"]),

@@ -19,7 +19,7 @@ class OrderItem(models.Model):
     )
     sku_id = models.UUIDField(db_index=True)
     product_id = models.UUIDField(db_index=True)
-    product_title = models.CharField(max_length=255)
+    name = models.CharField(max_length=255)
     sku_name = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField()
     unit_price = models.PositiveBigIntegerField()

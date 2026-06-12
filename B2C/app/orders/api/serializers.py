@@ -3,15 +3,9 @@ from rest_framework import serializers
 from app.buyers.models import Address, PaymentMethod
 
 
-class CheckoutItemSerializer(serializers.Serializer):
-    sku_id = serializers.UUIDField()
-    quantity = serializers.IntegerField(min_value=1)
-
-
 class CheckoutSerializer(serializers.Serializer):
-    allowed_fields = {"items", "address_id", "payment_method_id", "comment"}
+    allowed_fields = {"address_id", "payment_method_id", "comment"}
 
-    items = CheckoutItemSerializer(many=True, allow_empty=False)
     address_id = serializers.UUIDField()
     payment_method_id = serializers.UUIDField()
     comment = serializers.CharField(
